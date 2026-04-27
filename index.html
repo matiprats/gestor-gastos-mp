@@ -1,0 +1,582 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Gestor de Gastos MP</title>
+  <meta name="theme-color" content="#0f172a" />
+  <link rel="manifest" href="manifest.json" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/recharts/2.8.0/Recharts.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #f8fafc; font-family: 'Inter', system-ui, sans-serif; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useMemo, useEffect } = React;
+    const { PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } = Recharts;
+
+    // ── Webhook: recibe gastos del Apps Script ──────────────────────────────
+    // El Apps Script hace POST a esta URL con el gasto en JSON.
+    // Como es una app estática, usamos un Service Worker + BroadcastChannel
+    // para recibir los datos. Ver service-worker.js más abajo.
+
+    const STORAGE_KEY  = "gastos_mp_txs_v4";
+    const BUDGET_KEY   = "gastos_mp_budget_v4";
+    const FIXED_KEY    = "gastos_mp_fixed_v4";
+
+    const CATS = {
+      salud:        { label:"Salud",        emoji:"❤️",  color:"#fca5a5", text:"#dc2626" },
+      ocio:         { label:"Ocio",         emoji:"🎯",  color:"#99f6e4", text:"#0d9488" },
+      casa:         { label:"Casa",         emoji:"🏠",  color:"#fed7aa", text:"#ea580c" },
+      cafe:         { label:"Café",         emoji:"☕",  color:"#e9d5ff", text:"#7c3aed" },
+      educacion:    { label:"Educación",    emoji:"🎓",  color:"#bfdbfe", text:"#1d4ed8" },
+      regalos:      { label:"Regalos",      emoji:"🎁",  color:"#fbcfe8", text:"#be185d" },
+      alimentacion: { label:"Alimentación", emoji:"🛒",  color:"#bbf7d0", text:"#15803d" },
+      familia:      { label:"Familia",      emoji:"👨‍👩‍👧", color:"#fef08a", text:"#a16207" },
+      rutina:       { label:"Rutina",       emoji:"💪",  color:"#fed7aa", text:"#c2410c" },
+      transporte:   { label:"Transporte",   emoji:"🚌",  color:"#bfdbfe", text:"#1e40af" },
+      bebida:       { label:"Bebida",       emoji:"🍷",  color:"#fecaca", text:"#b91c1c" },
+      joda:         { label:"Joda",         emoji:"🕺",  color:"#fde68a", text:"#b45309" },
+      peluqueria:   { label:"Peluquería",   emoji:"✂️",  color:"#fef9c3", text:"#854d0e" },
+      pre:          { label:"Pre",          emoji:"🥸",  color:"#e2e8f0", text:"#475569" },
+      ana:          { label:"Ana",          emoji:"👧",  color:"#fce7f3", text:"#9d174d" },
+      futbol:       { label:"Futbol",       emoji:"⚽",  color:"#bbf7d0", text:"#166534" },
+      adelanto:     { label:"Adelanto",     emoji:"💸",  color:"#e2e8f0", text:"#334155" },
+      ropa:         { label:"Ropa",         emoji:"👕",  color:"#bfdbfe", text:"#1e3a8a" },
+      impuesto:     { label:"Impuesto",     emoji:"🧾",  color:"#fef08a", text:"#713f12" },
+      lavado:       { label:"Lavado",       emoji:"🫧",  color:"#e0f2fe", text:"#0369a1" },
+      restaurant:   { label:"Restaurant",   emoji:"🍔",  color:"#ffedd5", text:"#9a3412" },
+      lujo:         { label:"Lujo",         emoji:"✨",  color:"#f1f5f9", text:"#0f172a" },
+      nba:          { label:"NBA",          emoji:"🏀",  color:"#fed7aa", text:"#9a3412" },
+      trip:         { label:"Trip",         emoji:"⛺",  color:"#dcfce7", text:"#14532d" },
+      alpinista:    { label:"Alpinista",    emoji:"🥽",  color:"#d1fae5", text:"#065f46" },
+      topgolf:      { label:"TopGolf",      emoji:"👥",  color:"#ede9fe", text:"#5b21b6" },
+      otros:        { label:"Otros",        emoji:"❓",  color:"#f1f5f9", text:"#64748b" },
+    };
+
+    const MONTHS = ["Ene","Feb","Mar","Abr","May","Jun","Jul","Ago","Sep","Oct","Nov","Dic"];
+    const SAMPLE_TXS = [
+      { id:1, desc:"Transferencia a Juan",  amount:-3500, date:"2026-04-20", category:"otros",        type:"egreso",  source:"manual" },
+      { id:2, desc:"Cobro de María",        amount:5000,  date:"2026-04-22", category:"otros",        type:"ingreso", source:"manual" },
+      { id:3, desc:"Rappi",                 amount:-1200, date:"2026-04-24", category:"restaurant",   type:"egreso",  source:"manual" },
+      { id:4, desc:"SUBE",                  amount:-500,  date:"2026-04-15", category:"transporte",   type:"egreso",  source:"manual" },
+      { id:5, desc:"Supermercado",          amount:-4300, date:"2026-04-05", category:"alimentacion", type:"egreso",  source:"manual" },
+    ];
+    const SAMPLE_FIXED = [
+      { id:101, desc:"Alquiler",   amount:80000, dueDay:1,  category:"casa",   active:true },
+      { id:102, desc:"Netflix",    amount:2100,  dueDay:10, category:"ocio",   active:true },
+      { id:103, desc:"Gym",        amount:8500,  dueDay:15, category:"rutina", active:true },
+    ];
+
+    const fmt     = n => new Intl.NumberFormat("es-AR",{style:"currency",currency:"ARS",maximumFractionDigits:0}).format(n);
+    const fmtDate = d => { try{ const [y,m,dd]=d.split("-"); return dd+"/"+m; }catch{return d;} };
+
+    function parseMP(text) {
+      const t = text.toLowerCase();
+      if (!t.includes("mercado")) return { error: "No parece un email de Mercado Pago" };
+      const esIngreso = /recib|te\s+(enviaron|transfirieron|acredit)|ingres|cobr|te\s+pag/i.test(text);
+      const tipo = esIngreso ? "ingreso" : "egreso";
+      const montoMatch = text.match(/\$\s?([\d.,]+)/);
+      if (!montoMatch) return { error: "No se encontró el monto" };
+      const monto = parseFloat(montoMatch[1].replace(/\./g,"").replace(",","."));
+      if (isNaN(monto)||monto<=0) return { error: "Monto inválido" };
+      let fecha = new Date().toISOString().split("T")[0];
+      const f1 = text.match(/(\d{2})[\/\-](\d{2})[\/\-](\d{4})/);
+      const f2 = text.match(/(\d{4})[\/\-](\d{2})[\/\-](\d{2})/);
+      if (f1) fecha = f1[3]+"-"+f1[2]+"-"+f1[1];
+      else if (f2) fecha = f2[0];
+      let descripcion = tipo==="ingreso" ? "Transferencia recibida" : "Transferencia enviada";
+      const de   = text.match(/de[:\s]+([A-ZÀ-Ú][a-zA-ZÀ-ú\s]{2,25})/i);
+      const para = text.match(/(?:a|para)[:\s]+([A-ZÀ-Ú][a-zA-ZÀ-ú\s]{2,25})/i);
+      if (esIngreso && de)         descripcion = "De "+de[1].trim();
+      else if (!esIngreso && para) descripcion = "A "+para[1].trim();
+      return { tipo, monto, descripcion, fecha, categoria:"otros" };
+    }
+
+    function CatPicker({ tx, onSelect, onCancel }) {
+      return (
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.25)",zIndex:200,display:"flex",alignItems:"flex-end",backdropFilter:"blur(4px)"}}>
+          <div style={{width:"100%",maxWidth:430,margin:"0 auto",background:"#fff",borderRadius:"24px 24px 0 0",padding:"20px 16px 40px",maxHeight:"82vh",overflowY:"auto",boxShadow:"0 -8px 32px rgba(0,0,0,.1)"}}>
+            <div style={{width:36,height:4,borderRadius:99,background:"#e2e8f0",margin:"0 auto 16px"}}/>
+            <p style={{fontWeight:700,fontSize:16,margin:"0 0 4px",color:"#0f172a"}}>¿A qué categoría pertenece?</p>
+            <p style={{fontSize:13,color:"#94a3b8",margin:"0 0 16px"}}>{tx.descripcion} · {fmt(tx.monto)}</p>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10}}>
+              {Object.entries(CATS).map(([k,v])=>(
+                <button key={k} onClick={()=>onSelect(k)} style={{display:"flex",flexDirection:"column",alignItems:"center",gap:5,padding:"10px 4px",borderRadius:14,border:"none",background:v.color,cursor:"pointer"}}>
+                  <span style={{fontSize:20}}>{v.emoji}</span>
+                  <span style={{fontSize:10,color:v.text,fontWeight:600,textAlign:"center",lineHeight:1.2}}>{v.label}</span>
+                </button>
+              ))}
+            </div>
+            <button onClick={onCancel} style={{width:"100%",padding:"13px",borderRadius:14,border:"1.5px solid #e2e8f0",background:"#fff",color:"#94a3b8",fontSize:14,fontWeight:600,cursor:"pointer",marginTop:14}}>Cancelar</button>
+          </div>
+        </div>
+      );
+    }
+
+    function App() {
+      const [tab, setTab]       = useState("home");
+      const [txs, setTxs]       = useState(()=>{ try{ const v=localStorage.getItem(STORAGE_KEY); return v?JSON.parse(v):SAMPLE_TXS; }catch{return SAMPLE_TXS;} });
+      const [fixed, setFixed]   = useState(()=>{ try{ const v=localStorage.getItem(FIXED_KEY); return v?JSON.parse(v):SAMPLE_FIXED; }catch{return SAMPLE_FIXED;} });
+      const [budget, setBudget] = useState(()=>{ try{ return parseFloat(localStorage.getItem(BUDGET_KEY))||15000; }catch{return 15000;} });
+      const [editBudget, setEditBudget]   = useState(false);
+      const [budgetInput, setBudgetInput] = useState(budget);
+      const [emailText, setEmailText]     = useState("");
+      const [toast, setToast]             = useState(null);
+      const [pending, setPending]         = useState(null);
+      const [filter, setFilter]           = useState("all");
+      const [manualForm, setManualForm]   = useState({ desc:"", amount:"", date:new Date().toISOString().split("T")[0], category:"otros", type:"egreso" });
+      const [fixedForm, setFixedForm]     = useState({ desc:"", amount:"", dueDay:"1", category:"otros" });
+      const [showFixedForm, setShowFixedForm] = useState(false);
+      const [showAddModal, setShowAddModal]   = useState(false);
+      const [savings, setSavings] = useState(()=>{ try{ const v=localStorage.getItem("gastos_mp_savings"); return v?JSON.parse(v):[{id:1,name:"Efectivo ARS",currency:"ARS",amount:5000},{id:2,name:"Dólares billete",currency:"USD",amount:200}]; }catch{return [];} });
+      const [savingsGoal, setSavingsGoal] = useState(()=>{ try{ return parseFloat(localStorage.getItem("gastos_mp_goal"))||1000; }catch{return 1000;} });
+      const [dolarBlue, setDolarBlue] = useState(null);
+      const [dolarLoading, setDolarLoading] = useState(false);
+      const [showSavingsForm, setShowSavingsForm] = useState(false);
+      const [savingsForm, setSavingsForm] = useState({name:"",currency:"ARS",amount:""});
+      const [editGoal, setEditGoal] = useState(false);
+      const [goalInput, setGoalInput] = useState(savingsGoal);
+
+      useEffect(()=>{ try{ localStorage.setItem(STORAGE_KEY,JSON.stringify(txs)); }catch{} },[txs]);
+      useEffect(()=>{ try{ localStorage.setItem(BUDGET_KEY,budget); }catch{} },[budget]);
+      useEffect(()=>{ try{ localStorage.setItem(FIXED_KEY,JSON.stringify(fixed)); }catch{} },[fixed]);
+      useEffect(()=>{ try{ localStorage.setItem("gastos_mp_savings",JSON.stringify(savings)); }catch{} },[savings]);
+      useEffect(()=>{ try{ localStorage.setItem("gastos_mp_goal",savingsGoal); }catch{} },[savingsGoal]);
+      useEffect(()=>{ if(tab==="savings") fetchDolar(); },[tab]);
+
+      // Escuchar gastos nuevos enviados por el Apps Script via URL param
+      useEffect(()=>{
+        const params = new URLSearchParams(window.location.search);
+        const tx = params.get("tx");
+        if(tx){ try{ const data=JSON.parse(atob(tx)); setPending(data); window.history.replaceState({},"",window.location.pathname); }catch{} }
+      },[]);
+
+      const fetchDolar = async () => {
+        setDolarLoading(true);
+        try { const res=await fetch("https://dolarapi.com/v1/dolares/blue"); const data=await res.json(); setDolarBlue(data.venta); }
+        catch { setDolarBlue(null); }
+        finally { setDolarLoading(false); }
+      };
+
+      const showToast = (msg,ok=true) => { setToast({msg,ok}); setTimeout(()=>setToast(null),3000); };
+
+      const commitTx = (data, cat, source="manual") => {
+        setTxs(p=>[{ id:Date.now(), desc:data.descripcion||data.desc, amount:data.tipo==="egreso"?-Math.abs(data.monto||data.amount):Math.abs(data.monto||data.amount), date:data.fecha||data.date||new Date().toISOString().split("T")[0], category:cat, type:data.tipo||data.type, source },...p]);
+      };
+
+      const handleImport = () => {
+        if(!emailText.trim()) return;
+        const r = parseMP(emailText);
+        if(r.error){ showToast(r.error,false); return; }
+        setPending(r);
+      };
+
+      const handleManual = () => {
+        const {desc,amount,date,category,type}=manualForm;
+        if(!desc||!amount||!date){ showToast("Completá todos los campos",false); return; }
+        const n=parseFloat(amount.replace(",","."));
+        if(isNaN(n)){ showToast("Monto inválido",false); return; }
+        commitTx({descripcion:desc,monto:n,fecha:date,tipo:type},category,"manual");
+        setManualForm({desc:"",amount:"",date:new Date().toISOString().split("T")[0],category:"otros",type:"egreso"});
+        showToast("Gasto agregado ✓");
+        setShowAddModal(false);
+      };
+
+      const handleAddFixed = () => {
+        const {desc,amount,dueDay,category}=fixedForm;
+        if(!desc||!amount||!dueDay){ showToast("Completá todos los campos",false); return; }
+        const n=parseFloat(amount.replace(",","."));
+        if(isNaN(n)||n<=0){ showToast("Monto inválido",false); return; }
+        setFixed(p=>[...p,{id:Date.now(),desc,amount:n,dueDay:parseInt(dueDay),category,active:true}]);
+        setFixedForm({desc:"",amount:"",dueDay:"1",category:"otros"});
+        setShowFixedForm(false);
+        showToast("Gasto fijo agregado ✓");
+      };
+
+      const toggleFixed = id => setFixed(p=>p.map(f=>f.id===id?{...f,active:!f.active}:f));
+      const delFixed    = id => setFixed(p=>p.filter(f=>f.id!==id));
+      const delTx       = id => setTxs(p=>p.filter(t=>t.id!==id));
+
+      const now = new Date();
+      const today = now.getDate();
+      const thisMonth = txs.filter(t=>t.date.startsWith(now.getFullYear()+"-"+String(now.getMonth()+1).padStart(2,"0")));
+      const egresos  = thisMonth.filter(t=>t.amount<0).reduce((s,t)=>s+Math.abs(t.amount),0);
+      const ingresos = thisMonth.filter(t=>t.amount>0).reduce((s,t)=>s+t.amount,0);
+      const balance  = ingresos-egresos;
+      const pctBudget= Math.min(100,Math.round(egresos/budget*100));
+
+      const fixedWithStatus = useMemo(()=>fixed.filter(f=>f.active).map(f=>{
+        const daysLeft = f.dueDay - today;
+        let statusColor, statusBg, statusLabel;
+        if(daysLeft<0){ statusColor="#dc2626"; statusBg="#fef2f2"; statusLabel="Venció día "+f.dueDay; }
+        else if(daysLeft===0){ statusColor="#ea580c"; statusBg="#fff7ed"; statusLabel="Vence hoy"; }
+        else if(daysLeft<=3){ statusColor="#d97706"; statusBg="#fffbeb"; statusLabel="En "+daysLeft+" día"+(daysLeft>1?"s":""); }
+        else { statusColor="#15803d"; statusBg="#f0fdf4"; statusLabel="Día "+f.dueDay; }
+        return {...f,daysLeft,statusColor,statusBg,statusLabel};
+      }),[fixed,today]);
+
+      const totalFijos = fixed.filter(f=>f.active).reduce((s,f)=>s+f.amount,0);
+
+      const pieData = useMemo(()=>{
+        const map={};
+        thisMonth.filter(t=>t.amount<0).forEach(t=>{ map[t.category]=(map[t.category]||0)+Math.abs(t.amount); });
+        return Object.entries(map).map(([k,v])=>({name:CATS[k]?CATS[k].label:k,value:v,color:CATS[k]?CATS[k].text:"#64748b"}));
+      },[txs]);
+
+      const barData = useMemo(()=>{
+        const months=[];
+        for(let i=5;i>=0;i--){
+          const d=new Date(now.getFullYear(),now.getMonth()-i,1);
+          const key=d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0");
+          const eg=txs.filter(t=>t.date.startsWith(key)&&t.amount<0).reduce((s,t)=>s+Math.abs(t.amount),0);
+          const ing=txs.filter(t=>t.date.startsWith(key)&&t.amount>0).reduce((s,t)=>s+t.amount,0);
+          months.push({mes:MONTHS[d.getMonth()],Egresos:eg,Ingresos:ing});
+        }
+        return months;
+      },[txs]);
+
+      const filtered = filter==="all"?txs:txs.filter(t=>t.category===filter);
+
+      const inp = { width:"100%", background:"#f8fafc", border:"1.5px solid #e2e8f0", borderRadius:12, padding:"11px 14px", color:"#0f172a", fontSize:14, outline:"none", boxSizing:"border-box" };
+      const btn = { width:"100%", padding:"14px", borderRadius:14, border:"none", fontSize:15, fontWeight:700, cursor:"pointer", background:"#0f172a", color:"#fff" };
+      const btnSm = { padding:"7px 14px", borderRadius:10, border:"none", fontSize:13, fontWeight:600, cursor:"pointer" };
+      const card = { background:"#fff", borderRadius:20, padding:"18px 16px", margin:"0 16px 12px", boxShadow:"0 1px 4px rgba(0,0,0,.06)" };
+
+      const TABS=[
+        {id:"home",    icon:"⊙", label:"Inicio"},
+        {id:"txs",     icon:"≡", label:"Gastos"},
+        {id:"stats",   icon:"◷", label:"Stats"},
+        {id:"fixed",   icon:"↻", label:"Fijos"},
+        {id:"savings", icon:"◈", label:"Ahorros"},
+      ];
+
+      return (
+        <div style={{maxWidth:430,margin:"0 auto",minHeight:"100vh",background:"#f8fafc",color:"#0f172a",fontFamily:"Inter,system-ui,sans-serif",paddingBottom:80}}>
+
+          {toast&&<div style={{position:"fixed",top:20,left:"50%",transform:"translateX(-50%)",zIndex:300,background:toast.ok?"#0f172a":"#ef4444",color:"#fff",padding:"10px 22px",borderRadius:99,fontWeight:600,fontSize:14,boxShadow:"0 4px 20px rgba(0,0,0,.15)",whiteSpace:"nowrap"}}>{toast.msg}</div>}
+          {pending&&<CatPicker tx={pending} onSelect={cat=>{commitTx(pending,cat,"gmail");setPending(null);setEmailText("");showToast("Transferencia importada ✓");setTab("home");}} onCancel={()=>setPending(null)}/>}
+
+          {tab==="home"&&<button onClick={()=>setShowAddModal(true)} style={{position:"fixed",bottom:90,right:"calc(50% - 200px)",width:52,height:52,borderRadius:99,background:"#0f172a",color:"#fff",fontSize:26,border:"none",boxShadow:"0 4px 16px rgba(0,0,0,.2)",cursor:"pointer",zIndex:99,display:"flex",alignItems:"center",justifyContent:"center",lineHeight:1}}>+</button>}
+
+          {showAddModal&&(
+            <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.25)",zIndex:200,display:"flex",alignItems:"flex-end",backdropFilter:"blur(4px)"}}>
+              <div style={{width:"100%",maxWidth:430,margin:"0 auto",background:"#fff",borderRadius:"24px 24px 0 0",padding:"20px 16px 40px",maxHeight:"90vh",overflowY:"auto",boxShadow:"0 -8px 32px rgba(0,0,0,.1)"}}>
+                <div style={{width:36,height:4,borderRadius:99,background:"#e2e8f0",margin:"0 auto 16px"}}/>
+                <p style={{fontWeight:700,fontSize:17,margin:"0 0 16px"}}>Agregar movimiento</p>
+                <div style={{display:"flex",gap:8,marginBottom:14}}>
+                  {["egreso","ingreso"].map(t=>(
+                    <button key={t} onClick={()=>setManualForm(f=>({...f,type:t}))} style={{...btnSm,flex:1,background:manualForm.type===t?"#0f172a":"#f1f5f9",color:manualForm.type===t?"#fff":"#64748b",padding:"10px"}}>
+                      {t==="egreso"?"↑ Egreso":"↓ Ingreso"}
+                    </button>
+                  ))}
+                </div>
+                <p style={{fontSize:12,color:"#94a3b8",margin:"0 0 6px"}}>📧 Pegar email de MP</p>
+                <textarea style={{...inp,resize:"vertical",minHeight:80,fontSize:13,marginBottom:8}} placeholder={"Pegá el texto del email de MP...\nEj: Te transferimos $5.000 de Juan"} value={emailText} onChange={e=>setEmailText(e.target.value)}/>
+                <button onClick={handleImport} disabled={!emailText.trim()} style={{...btn,marginBottom:16,opacity:!emailText.trim()?0.4:1}}>Detectar transferencia</button>
+                <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:14}}>
+                  <div style={{flex:1,height:1,background:"#f1f5f9"}}/><span style={{fontSize:12,color:"#cbd5e1"}}>o cargá a mano</span><div style={{flex:1,height:1,background:"#f1f5f9"}}/>
+                </div>
+                <p style={{fontSize:12,color:"#94a3b8",margin:"0 0 6px"}}>Descripción</p>
+                <input style={{...inp,marginBottom:10}} placeholder="Ej: Kiosco" value={manualForm.desc} onChange={e=>setManualForm(f=>({...f,desc:e.target.value}))}/>
+                <p style={{fontSize:12,color:"#94a3b8",margin:"0 0 6px"}}>Monto (ARS)</p>
+                <input style={{...inp,marginBottom:10}} type="number" placeholder="0" value={manualForm.amount} onChange={e=>setManualForm(f=>({...f,amount:e.target.value}))}/>
+                <p style={{fontSize:12,color:"#94a3b8",margin:"0 0 6px"}}>Fecha</p>
+                <input style={{...inp,marginBottom:12}} type="date" value={manualForm.date} onChange={e=>setManualForm(f=>({...f,date:e.target.value}))}/>
+                <p style={{fontSize:12,color:"#94a3b8",margin:"0 0 8px"}}>Categoría</p>
+                <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8,marginBottom:14}}>
+                  {Object.entries(CATS).map(([k,v])=>(
+                    <button key={k} onClick={()=>setManualForm(f=>({...f,category:k}))}
+                      style={{display:"flex",flexDirection:"column",alignItems:"center",gap:4,padding:"8px 4px",borderRadius:12,border:"2px solid "+(manualForm.category===k?v.text:"transparent"),background:v.color,cursor:"pointer"}}>
+                      <span style={{fontSize:16}}>{v.emoji}</span>
+                      <span style={{fontSize:9,color:v.text,fontWeight:600,textAlign:"center"}}>{v.label}</span>
+                    </button>
+                  ))}
+                </div>
+                <div style={{display:"flex",gap:8}}>
+                  <button onClick={()=>setShowAddModal(false)} style={{...btn,background:"#f1f5f9",color:"#64748b",flex:1}}>Cancelar</button>
+                  <button onClick={handleManual} style={{...btn,flex:1}}>Agregar</button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          <div style={{padding:"52px 20px 20px",background:"#fff",borderBottom:"1px solid #f1f5f9"}}>
+            <p style={{fontSize:13,color:"#94a3b8",margin:"0 0 2px",fontWeight:500}}>💳 Mercado Pago</p>
+            <p style={{fontSize:24,fontWeight:800,margin:0,color:"#0f172a"}}>{MONTHS[now.getMonth()]} {now.getFullYear()}</p>
+          </div>
+
+          {tab==="home"&&<>
+            <div style={{...card,marginTop:16,background:"#0f172a",color:"#fff"}}>
+              <p style={{fontSize:13,color:"#94a3b8",margin:"0 0 4px"}}>Balance del mes</p>
+              <p style={{fontSize:34,fontWeight:800,margin:"0 0 20px",color:balance>=0?"#4ade80":"#f87171"}}>{fmt(balance)}</p>
+              <div style={{display:"flex"}}>
+                <div style={{flex:1,borderRight:"1px solid #1e293b"}}>
+                  <p style={{fontSize:11,color:"#64748b",margin:"0 0 2px"}}>Ingresos</p>
+                  <p style={{fontSize:16,fontWeight:700,margin:0,color:"#4ade80"}}>{fmt(ingresos)}</p>
+                </div>
+                <div style={{flex:1,paddingLeft:16}}>
+                  <p style={{fontSize:11,color:"#64748b",margin:"0 0 2px"}}>Egresos</p>
+                  <p style={{fontSize:16,fontWeight:700,margin:0,color:"#f87171"}}>{fmt(egresos)}</p>
+                </div>
+              </div>
+            </div>
+            <div style={card}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                <p style={{fontSize:14,fontWeight:700,margin:0}}>Presupuesto</p>
+                {editBudget
+                  ?<div style={{display:"flex",gap:6}}><input style={{...inp,width:110,padding:"6px 10px"}} type="number" value={budgetInput} onChange={e=>setBudgetInput(e.target.value)}/><button onClick={()=>{setBudget(parseFloat(budgetInput)||budget);setEditBudget(false);}} style={{...btnSm,background:"#0f172a",color:"#fff"}}>OK</button></div>
+                  :<button onClick={()=>{setEditBudget(true);setBudgetInput(budget);}} style={{...btnSm,background:"#f1f5f9",color:"#64748b"}}>Editar</button>
+                }
+              </div>
+              <div style={{display:"flex",justifyContent:"space-between",marginBottom:8}}>
+                <span style={{fontSize:13,color:"#64748b"}}>{fmt(egresos)} de {fmt(budget)}</span>
+                <span style={{fontSize:13,fontWeight:700,color:pctBudget>80?"#ef4444":"#10b981"}}>{pctBudget}%</span>
+              </div>
+              <div style={{height:6,background:"#f1f5f9",borderRadius:99}}>
+                <div style={{height:6,borderRadius:99,width:pctBudget+"%",background:pctBudget>80?"#ef4444":"#10b981",transition:"width .4s"}}/>
+              </div>
+              {pctBudget>80&&<p style={{fontSize:12,color:"#ef4444",margin:"8px 0 0"}}>⚠️ Superaste el 80% del presupuesto</p>}
+            </div>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"4px 16px 8px"}}>
+              <p style={{fontSize:15,fontWeight:700,margin:0}}>Últimos movimientos</p>
+              <button onClick={()=>setTab("txs")} style={{...btnSm,background:"none",color:"#94a3b8",padding:"4px 0"}}>Ver todos →</button>
+            </div>
+            <div style={card}>
+              {txs.slice(0,5).map((t,i)=>(
+                <div key={t.id} style={{display:"flex",alignItems:"center",gap:12,padding:"11px 0",borderBottom:i<4?"1px solid #f8fafc":"none"}}>
+                  <div style={{width:40,height:40,borderRadius:12,background:CATS[t.category]?CATS[t.category].color:"#f1f5f9",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}}>{CATS[t.category]?CATS[t.category].emoji:"❓"}</div>
+                  <div style={{flex:1,minWidth:0}}>
+                    <p style={{margin:0,fontSize:14,fontWeight:600,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{t.desc}</p>
+                    <p style={{margin:0,fontSize:12,color:"#94a3b8"}}>{fmtDate(t.date)} · {CATS[t.category]?CATS[t.category].label:""}</p>
+                  </div>
+                  <span style={{fontWeight:700,color:t.amount>0?"#10b981":"#ef4444",fontSize:15,whiteSpace:"nowrap"}}>{t.amount>0?"+":""}{fmt(t.amount)}</span>
+                </div>
+              ))}
+            </div>
+          </>}
+
+          {tab==="txs"&&<>
+            <div style={{padding:"16px 16px 8px",display:"flex",gap:8,overflowX:"auto"}}>
+              <button onClick={()=>setFilter("all")} style={{...btnSm,background:filter==="all"?"#0f172a":"#fff",color:filter==="all"?"#fff":"#64748b",whiteSpace:"nowrap",boxShadow:"0 1px 3px rgba(0,0,0,.08)"}}>Todos</button>
+              {Object.entries(CATS).map(([k,v])=>(
+                <button key={k} onClick={()=>setFilter(k)} style={{...btnSm,background:filter===k?v.color:"#fff",color:filter===k?v.text:"#64748b",whiteSpace:"nowrap",boxShadow:"0 1px 3px rgba(0,0,0,.08)",padding:"7px 10px"}}>{v.emoji}</button>
+              ))}
+            </div>
+            <div style={card}>
+              {filtered.length===0&&<p style={{color:"#94a3b8",textAlign:"center",padding:"24px 0",fontSize:14}}>Sin movimientos</p>}
+              {filtered.map((t,i)=>(
+                <div key={t.id} style={{display:"flex",alignItems:"center",gap:12,padding:"11px 0",borderBottom:i<filtered.length-1?"1px solid #f8fafc":"none"}}>
+                  <div style={{width:40,height:40,borderRadius:12,background:CATS[t.category]?CATS[t.category].color:"#f1f5f9",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}}>{CATS[t.category]?CATS[t.category].emoji:"❓"}</div>
+                  <div style={{flex:1,minWidth:0}}>
+                    <p style={{margin:0,fontSize:14,fontWeight:600,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{t.desc}</p>
+                    <p style={{margin:0,fontSize:12,color:"#94a3b8"}}>{fmtDate(t.date)} · {CATS[t.category]?CATS[t.category].label:""}</p>
+                  </div>
+                  <div style={{display:"flex",alignItems:"center",gap:8}}>
+                    <span style={{fontWeight:700,color:t.amount>0?"#10b981":"#ef4444",fontSize:14,whiteSpace:"nowrap"}}>{t.amount>0?"+":""}{fmt(t.amount)}</span>
+                    <button onClick={()=>delTx(t.id)} style={{...btnSm,background:"#fff5f5",color:"#ef4444",padding:"4px 8px",fontSize:12}}>✕</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </>}
+
+          {tab==="stats"&&<>
+            <div style={{padding:"16px 0 0"}}>
+              <p style={{fontSize:15,fontWeight:700,margin:"0 16px 10px"}}>Por categoría</p>
+              <div style={card}>
+                {pieData.length===0
+                  ?<p style={{color:"#94a3b8",textAlign:"center",padding:24,fontSize:14}}>Sin datos este mes</p>
+                  :<>
+                    <ResponsiveContainer width="100%" height={200}>
+                      <PieChart>
+                        <Pie data={pieData} cx="50%" cy="50%" outerRadius={80} dataKey="value" label={({name,percent})=>Math.round(percent*100)+"%"} labelLine={false} fontSize={11}>
+                          {pieData.map((e,i)=><Cell key={i} fill={e.color}/>)}
+                        </Pie>
+                        <Tooltip formatter={v=>fmt(v)} contentStyle={{background:"#fff",border:"1px solid #e2e8f0",borderRadius:10,color:"#0f172a",fontSize:13}}/>
+                      </PieChart>
+                    </ResponsiveContainer>
+                    {pieData.map((e,i)=>(
+                      <div key={i} style={{display:"flex",justifyContent:"space-between",padding:"8px 0",borderTop:"1px solid #f8fafc"}}>
+                        <div style={{display:"flex",alignItems:"center",gap:8}}><div style={{width:8,height:8,borderRadius:99,background:e.color}}/><span style={{fontSize:13,color:"#334155"}}>{e.name}</span></div>
+                        <span style={{fontSize:13,fontWeight:700}}>{fmt(e.value)}</span>
+                      </div>
+                    ))}
+                  </>
+                }
+              </div>
+              <p style={{fontSize:15,fontWeight:700,margin:"4px 16px 10px"}}>Últimos 6 meses</p>
+              <div style={card}>
+                <ResponsiveContainer width="100%" height={200}>
+                  <BarChart data={barData} barSize={10}>
+                    <XAxis dataKey="mes" stroke="#cbd5e1" fontSize={11} tickLine={false} axisLine={false}/>
+                    <YAxis stroke="#cbd5e1" fontSize={10} tickLine={false} axisLine={false} tickFormatter={v=>v>=1000?v/1000+"k":v}/>
+                    <Tooltip formatter={v=>fmt(v)} contentStyle={{background:"#fff",border:"1px solid #e2e8f0",borderRadius:10,color:"#0f172a",fontSize:13}}/>
+                    <Bar dataKey="Ingresos" fill="#4ade80" radius={[4,4,0,0]}/>
+                    <Bar dataKey="Egresos"  fill="#f87171" radius={[4,4,0,0]}/>
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+          </>}
+
+          {tab==="fixed"&&<>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"16px 16px 8px"}}>
+              <p style={{fontSize:15,fontWeight:700,margin:0}}>Gastos fijos</p>
+              <button onClick={()=>setShowFixedForm(v=>!v)} style={{...btnSm,background:"#0f172a",color:"#fff"}}>+ Agregar</button>
+            </div>
+            <div style={{...card,background:"#0f172a",color:"#fff",padding:"16px"}}>
+              <p style={{fontSize:12,color:"#64748b",margin:"0 0 2px"}}>Total mensual fijo</p>
+              <p style={{fontSize:26,fontWeight:800,margin:0,color:"#f87171"}}>{fmt(totalFijos)}</p>
+            </div>
+            {showFixedForm&&(
+              <div style={card}>
+                <p style={{fontSize:14,fontWeight:700,margin:"0 0 12px"}}>Nuevo gasto fijo</p>
+                <p style={{fontSize:12,color:"#94a3b8",margin:"0 0 6px"}}>Nombre</p>
+                <input style={{...inp,marginBottom:10}} placeholder="Ej: Netflix, Gym..." value={fixedForm.desc} onChange={e=>setFixedForm(f=>({...f,desc:e.target.value}))}/>
+                <p style={{fontSize:12,color:"#94a3b8",margin:"0 0 6px"}}>Monto mensual (ARS)</p>
+                <input style={{...inp,marginBottom:10}} type="number" placeholder="0" value={fixedForm.amount} onChange={e=>setFixedForm(f=>({...f,amount:e.target.value}))}/>
+                <p style={{fontSize:12,color:"#94a3b8",margin:"0 0 6px"}}>Día del mes que vence</p>
+                <input style={{...inp,marginBottom:10}} type="number" min="1" max="31" placeholder="Ej: 10" value={fixedForm.dueDay} onChange={e=>setFixedForm(f=>({...f,dueDay:e.target.value}))}/>
+                <p style={{fontSize:12,color:"#94a3b8",margin:"0 0 8px"}}>Categoría</p>
+                <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8,marginBottom:14}}>
+                  {Object.entries(CATS).map(([k,v])=>(
+                    <button key={k} onClick={()=>setFixedForm(f=>({...f,category:k}))}
+                      style={{display:"flex",flexDirection:"column",alignItems:"center",gap:4,padding:"8px 4px",borderRadius:12,border:"2px solid "+(fixedForm.category===k?v.text:"transparent"),background:v.color,cursor:"pointer"}}>
+                      <span style={{fontSize:16}}>{v.emoji}</span>
+                      <span style={{fontSize:9,color:v.text,fontWeight:600,textAlign:"center"}}>{v.label}</span>
+                    </button>
+                  ))}
+                </div>
+                <div style={{display:"flex",gap:8}}>
+                  <button onClick={()=>setShowFixedForm(false)} style={{...btn,background:"#f1f5f9",color:"#64748b",flex:1}}>Cancelar</button>
+                  <button onClick={handleAddFixed} style={{...btn,flex:1}}>Guardar</button>
+                </div>
+              </div>
+            )}
+            <div style={card}>
+              {fixedWithStatus.length===0&&<p style={{color:"#94a3b8",textAlign:"center",padding:"24px 0",fontSize:14}}>No tenés gastos fijos</p>}
+              {fixedWithStatus.map((f,i)=>(
+                <div key={f.id} style={{display:"flex",alignItems:"center",gap:12,padding:"12px 0",borderBottom:i<fixedWithStatus.length-1?"1px solid #f8fafc":"none"}}>
+                  <div style={{width:42,height:42,borderRadius:12,background:CATS[f.category]?CATS[f.category].color:"#f1f5f9",display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,flexShrink:0}}>{CATS[f.category]?CATS[f.category].emoji:"❓"}</div>
+                  <div style={{flex:1,minWidth:0}}>
+                    <p style={{margin:0,fontSize:14,fontWeight:600}}>{f.desc}</p>
+                    <span style={{display:"inline-block",fontSize:11,fontWeight:600,color:f.statusColor,background:f.statusBg,padding:"2px 8px",borderRadius:99,marginTop:3}}>{f.statusLabel}</span>
+                  </div>
+                  <div style={{textAlign:"right"}}>
+                    <p style={{margin:0,fontSize:15,fontWeight:700,color:"#ef4444"}}>{fmt(f.amount)}</p>
+                    <button onClick={()=>delFixed(f.id)} style={{...btnSm,background:"none",color:"#cbd5e1",padding:"2px 0",fontSize:11}}>eliminar</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </>}
+
+          {tab==="savings"&&<>
+            <div style={{padding:"16px 0 0"}}>
+              {(()=>{
+                const totalARS = savings.reduce((s,b)=>b.currency==="ARS"?s+b.amount:s+(dolarBlue?b.amount*dolarBlue:0),0);
+                const totalUSD = savings.filter(b=>b.currency==="USD").reduce((s,b)=>s+b.amount,0);
+                const pctGoal  = Math.min(100,Math.round(totalUSD/savingsGoal*100));
+                return <>
+                  <div style={{...card,background:"#0f172a",color:"#fff"}}>
+                    <p style={{fontSize:12,color:"#64748b",margin:"0 0 2px"}}>Total ahorrado</p>
+                    <p style={{fontSize:32,fontWeight:800,margin:"0 0 4px",color:"#4ade80"}}>{fmt(totalARS)}</p>
+                    <p style={{fontSize:13,color:"#64748b",margin:"0 0 16px"}}>≈ U$S {totalUSD.toLocaleString("es-AR")}{dolarBlue?" · Blue $"+dolarBlue:""}</p>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                      <span style={{fontSize:12,color:"#64748b"}}>Dólar blue</span>
+                      <button onClick={fetchDolar} style={{...btnSm,background:"#1e293b",color:"#94a3b8",padding:"5px 12px",fontSize:12}}>{dolarLoading?"...":(dolarBlue?"$"+dolarBlue+" ↻":"Actualizar")}</button>
+                    </div>
+                  </div>
+                  <div style={card}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                      <p style={{fontSize:14,fontWeight:700,margin:0}}>Meta en USD</p>
+                      {editGoal
+                        ?<div style={{display:"flex",gap:6}}><input style={{...inp,width:100,padding:"6px 10px"}} type="number" value={goalInput} onChange={e=>setGoalInput(e.target.value)}/><button onClick={()=>{setSavingsGoal(parseFloat(goalInput)||savingsGoal);setEditGoal(false);}} style={{...btnSm,background:"#0f172a",color:"#fff"}}>OK</button></div>
+                        :<button onClick={()=>{setEditGoal(true);setGoalInput(savingsGoal);}} style={{...btnSm,background:"#f1f5f9",color:"#64748b"}}>Editar</button>
+                      }
+                    </div>
+                    <div style={{display:"flex",justifyContent:"space-between",marginBottom:8}}>
+                      <span style={{fontSize:13,color:"#64748b"}}>U$S {totalUSD.toLocaleString()} de U$S {savingsGoal.toLocaleString()}</span>
+                      <span style={{fontSize:13,fontWeight:700,color:pctGoal>=100?"#10b981":"#0f172a"}}>{pctGoal}%</span>
+                    </div>
+                    <div style={{height:6,background:"#f1f5f9",borderRadius:99}}>
+                      <div style={{height:6,borderRadius:99,width:pctGoal+"%",background:pctGoal>=100?"#10b981":"#0f172a",transition:"width .4s"}}/>
+                    </div>
+                    {pctGoal>=100&&<p style={{fontSize:12,color:"#10b981",margin:"8px 0 0"}}>🎉 Meta alcanzada!</p>}
+                  </div>
+                </>;
+              })()}
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"4px 16px 8px"}}>
+                <p style={{fontSize:15,fontWeight:700,margin:0}}>Mis bolsillos</p>
+                <button onClick={()=>setShowSavingsForm(v=>!v)} style={{...btnSm,background:"#0f172a",color:"#fff"}}>+ Agregar</button>
+              </div>
+              {showSavingsForm&&<div style={card}>
+                <p style={{fontSize:14,fontWeight:700,margin:"0 0 12px"}}>Nuevo bolsillo</p>
+                <p style={{fontSize:12,color:"#94a3b8",margin:"0 0 6px"}}>Nombre</p>
+                <input style={{...inp,marginBottom:10}} placeholder="Ej: Caja de ahorro, USDT..." value={savingsForm.name} onChange={e=>setSavingsForm(f=>({...f,name:e.target.value}))}/>
+                <p style={{fontSize:12,color:"#94a3b8",margin:"0 0 6px"}}>Moneda</p>
+                <div style={{display:"flex",gap:8,marginBottom:10}}>
+                  {["ARS","USD"].map(c=>(
+                    <button key={c} onClick={()=>setSavingsForm(f=>({...f,currency:c}))} style={{...btnSm,flex:1,background:savingsForm.currency===c?"#0f172a":"#f1f5f9",color:savingsForm.currency===c?"#fff":"#64748b",padding:"10px"}}>
+                      {c==="ARS"?"$ Pesos":"U$S Dólares"}
+                    </button>
+                  ))}
+                </div>
+                <p style={{fontSize:12,color:"#94a3b8",margin:"0 0 6px"}}>Monto actual</p>
+                <input style={{...inp,marginBottom:12}} type="number" placeholder="0" value={savingsForm.amount} onChange={e=>setSavingsForm(f=>({...f,amount:e.target.value}))}/>
+                <div style={{display:"flex",gap:8}}>
+                  <button onClick={()=>setShowSavingsForm(false)} style={{...btn,background:"#f1f5f9",color:"#64748b",flex:1}}>Cancelar</button>
+                  <button onClick={()=>{
+                    if(!savingsForm.name||!savingsForm.amount) return;
+                    setSavings(p=>[...p,{id:Date.now(),name:savingsForm.name,currency:savingsForm.currency,amount:parseFloat(savingsForm.amount)}]);
+                    setSavingsForm({name:"",currency:"ARS",amount:""});
+                    setShowSavingsForm(false);
+                    showToast("Bolsillo agregado ✓");
+                  }} style={{...btn,flex:1}}>Guardar</button>
+                </div>
+              </div>}
+              <div style={card}>
+                {savings.length===0&&<p style={{color:"#94a3b8",textAlign:"center",padding:"24px 0",fontSize:14}}>No tenés bolsillos cargados</p>}
+                {savings.map((b,i)=>(
+                  <div key={b.id} style={{display:"flex",alignItems:"center",gap:12,padding:"12px 0",borderBottom:i<savings.length-1?"1px solid #f8fafc":"none"}}>
+                    <div style={{width:42,height:42,borderRadius:12,background:b.currency==="USD"?"#fef9c3":"#f0fdf4",display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,flexShrink:0}}>{b.currency==="USD"?"$":"₱"}</div>
+                    <div style={{flex:1,minWidth:0}}>
+                      <p style={{margin:0,fontSize:14,fontWeight:600}}>{b.name}</p>
+                      <p style={{margin:0,fontSize:12,color:"#94a3b8"}}>{b.currency==="USD"&&dolarBlue?"≈ "+fmt(b.amount*dolarBlue):b.currency}</p>
+                    </div>
+                    <div style={{textAlign:"right"}}>
+                      <p style={{margin:0,fontSize:15,fontWeight:700}}>{b.currency==="USD"?"U$S ":""}{b.amount.toLocaleString("es-AR")}</p>
+                      <div style={{display:"flex",gap:6,justifyContent:"flex-end",marginTop:4}}>
+                        <button onClick={()=>{const val=prompt("Nuevo monto:",b.amount);if(val&&!isNaN(parseFloat(val)))setSavings(p=>p.map(s=>s.id===b.id?{...s,amount:parseFloat(val)}:s));}} style={{...btnSm,background:"#f1f5f9",color:"#64748b",padding:"3px 8px",fontSize:11}}>editar</button>
+                        <button onClick={()=>setSavings(p=>p.filter(s=>s.id!==b.id))} style={{...btnSm,background:"#fff5f5",color:"#ef4444",padding:"3px 8px",fontSize:11}}>✕</button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </>}
+
+          <nav style={{position:"fixed",bottom:0,left:"50%",transform:"translateX(-50%)",width:"100%",maxWidth:430,background:"#fff",borderTop:"1px solid #f1f5f9",display:"flex",zIndex:100}}>
+            {TABS.map(t=>(
+              <button key={t.id} onClick={()=>setTab(t.id)} style={{flex:1,padding:"12px 0 10px",border:"none",background:"none",cursor:"pointer",fontSize:10,fontWeight:700,display:"flex",flexDirection:"column",alignItems:"center",gap:3,color:tab===t.id?"#0f172a":"#cbd5e1"}}>
+                <span style={{fontSize:18,lineHeight:1}}>{t.icon}</span>
+                <span>{t.label}</span>
+              </button>
+            ))}
+          </nav>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+  </script>
+</body>
+</html>
